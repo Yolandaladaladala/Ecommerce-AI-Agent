@@ -959,3 +959,4 @@ Return:
 Be concise, commercial and management-ready.
 """
     return chat(prompt)
+
