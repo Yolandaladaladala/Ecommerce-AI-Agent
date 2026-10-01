@@ -27,7 +27,14 @@ from storage.file_store import (
     upload_project_file, save_generated_report, list_project_files,
 )
 
+from io import BytesIO
 
+from docx import Document
+from docx.shared import Pt
+
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 # =========================================================
 # App setup
 # =========================================================
@@ -129,7 +136,8 @@ I18N = {
         "missing": "缺失字段",
         "launch_pack": "Launch Pack",
         "ops_language_note": "面向巴西消费者的 Listing 默认以巴西葡萄牙语生成，这是当前 Operations 工具的业务设定。",
-        "download_launch": "下载 Launch Pack (.md)",
+        "download_launch_word": "下载 Word Report",
+        "download_launch_pdf": "下载 PDF Report",
         "marketing_title": "03 Marketing / Creator / Content",
         "marketing_sub": "整合 Creator 数据、筛选逻辑与 AI 分析，形成更清晰的达人选择和内容执行方案。",
         "campaign_id": "Campaign ID *",
@@ -1032,6 +1040,88 @@ def download_markdown(label: str, content: str, filename: str, key: str) -> None
         key=key,
     )
 
+    def build_word_report(title: str, content: str) -> bytes:
+    buffer = BytesIO()
+
+    doc = Document()
+    doc.add_heading(title, level=0)
+
+    for line in content.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("### "):
+            doc.add_heading(line[4:], level=3)
+
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+
+        elif line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
+
+        elif line.startswith("- "):
+            doc.add_paragraph(line[2:], style="List Bullet")
+
+        else:
+            doc.add_paragraph(line)
+
+    doc.save(buffer)
+    buffer.seek(0)
+
+    return buffer.getvalue()
+
+
+def build_pdf_report(title: str, content: str) -> bytes:
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=40,
+        bottomMargin=40,
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph(title, styles["Title"]))
+    story.append(Spacer(1, 16))
+
+    for line in content.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("### "):
+            story.append(Paragraph(line[4:], styles["Heading3"]))
+
+        elif line.startswith("## "):
+            story.append(Paragraph(line[3:], styles["Heading2"]))
+
+        elif line.startswith("# "):
+            story.append(Paragraph(line[2:], styles["Heading1"]))
+
+        elif line.startswith("- "):
+            story.append(
+                Paragraph("• " + line[2:], styles["BodyText"])
+            )
+
+        else:
+            story.append(
+                Paragraph(line, styles["BodyText"])
+            )
+
+        story.append(Spacer(1, 6))
+
+    doc.build(story)
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 def safe_template_bytes(path: Path) -> bytes | None:
     try:
@@ -1744,12 +1834,42 @@ elif module == "operations":
         if result.get("missing"):
             st.warning(f"{t['missing']}: " + ", ".join(result["missing"]))
         st.markdown(f"### {t['launch_pack']}")
-        st.markdown(result.get("generated_pack") or "")
-        download_markdown(
-            t["download_launch"],
-            result.get("generated_pack") or "",
-            f"launch_pack_{result.get('sku', 'SKU')}.md",
-            "download_launch_pack",
+
+content = result.get("generated_pack") or ""
+
+st.markdown(content)
+
+if content.strip():
+    report_title = f"Launch Pack — {result.get('sku', 'SKU')}"
+
+    word_bytes = build_word_report(
+        report_title,
+        content,
+    )
+
+    pdf_bytes = build_pdf_report(
+        report_title,
+        content,
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            "Download Word Report",
+            data=word_bytes,
+            file_name=f"launch_pack_{result.get('sku', 'SKU')}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="download_launch_word",
+        )
+
+    with col2:
+        st.download_button(
+            "Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"launch_pack_{result.get('sku', 'SKU')}.pdf",
+            mime="application/pdf",
+            key="download_launch_pdf",
         )
 
 
