@@ -15,26 +15,9 @@ from tools.operations import run_operations
 from tools.marketing import load_creator_file, score_creators, explain_creator_fit, analyse_creator_dataset
 from tools.finance import load_finance_file, analyse_finance
 from llm import chat
-from config import DEMO_MODE, SERPER_API_KEY, AUTH_REQUIRED, PERSISTENCE_CONFIGURED
-from storage.auth import current_user, sign_in, sign_up, sign_out
-from storage.project_store import (
-    create_project, get_project, list_projects, update_project,
-    save_module_result, get_latest_module_result, get_module_statuses,
-    list_activity, persistence_mode,
-    save_market_evidence, save_creator_records, save_finance_metrics,
-)
-from storage.file_store import (
-    upload_project_file, save_generated_report, list_project_files,
-)
+from config import DEMO_MODE, SERPER_API_KEY
 
-from io import BytesIO
 
-from docx import Document
-from docx.shared import Pt
-
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
 # =========================================================
 # App setup
 # =========================================================
@@ -136,8 +119,7 @@ I18N = {
         "missing": "缺失字段",
         "launch_pack": "Launch Pack",
         "ops_language_note": "面向巴西消费者的 Listing 默认以巴西葡萄牙语生成，这是当前 Operations 工具的业务设定。",
-        "download_launch_word": "下载 Word Report",
-        "download_launch_pdf": "下载 PDF Report",
+        "download_launch": "下载 Launch Pack (.md)",
         "marketing_title": "03 Marketing / Creator / Content",
         "marketing_sub": "整合 Creator 数据、筛选逻辑与 AI 分析，形成更清晰的达人选择和内容执行方案。",
         "campaign_id": "Campaign ID *",
@@ -957,8 +939,6 @@ DEFAULTS = {
     "ops_result": None,
     "marketing_result": None,
     "finance_result": None,
-    "active_project_id": None,
-    "_active_project_loaded": None,
 }
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
@@ -1040,169 +1020,12 @@ def download_markdown(label: str, content: str, filename: str, key: str) -> None
         key=key,
     )
 
-    def build_word_report(title: str, content: str) -> bytes:
-    buffer = BytesIO()
-
-    doc = Document()
-    doc.add_heading(title, level=0)
-
-    for line in content.splitlines():
-        line = line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("### "):
-            doc.add_heading(line[4:], level=3)
-
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], level=2)
-
-        elif line.startswith("# "):
-            doc.add_heading(line[2:], level=1)
-
-        elif line.startswith("- "):
-            doc.add_paragraph(line[2:], style="List Bullet")
-
-        else:
-            doc.add_paragraph(line)
-
-    doc.save(buffer)
-    buffer.seek(0)
-
-    return buffer.getvalue()
-
-
-def build_pdf_report(title: str, content: str) -> bytes:
-    buffer = BytesIO()
-
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=40,
-        leftMargin=40,
-        topMargin=40,
-        bottomMargin=40,
-    )
-
-    styles = getSampleStyleSheet()
-    story = []
-
-    story.append(Paragraph(title, styles["Title"]))
-    story.append(Spacer(1, 16))
-
-    for line in content.splitlines():
-        line = line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("### "):
-            story.append(Paragraph(line[4:], styles["Heading3"]))
-
-        elif line.startswith("## "):
-            story.append(Paragraph(line[3:], styles["Heading2"]))
-
-        elif line.startswith("# "):
-            story.append(Paragraph(line[2:], styles["Heading1"]))
-
-        elif line.startswith("- "):
-            story.append(
-                Paragraph("• " + line[2:], styles["BodyText"])
-            )
-
-        else:
-            story.append(
-                Paragraph(line, styles["BodyText"])
-            )
-
-        story.append(Spacer(1, 6))
-
-    doc.build(story)
-
-    buffer.seek(0)
-    return buffer.getvalue()
 
 def safe_template_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
     except Exception:
         return None
-
-
-def _clear_project_widget_state() -> None:
-    """Clear module widgets when switching projects so data never leaks across projects."""
-    prefixes = ("market_", "ops_", "mkt_", "finance_", "creator_file")
-    explicit = {
-        "market_result", "ops_result", "marketing_result", "finance_result",
-        "market_last_query", "mkt_campaign_internal_id",
-        "ops_merchant_internal_id", "ops_product_internal_id", "ops_sku_internal_id",
-    }
-    for key in list(st.session_state.keys()):
-        if key in explicit or key.startswith(prefixes):
-            st.session_state.pop(key, None)
-
-
-def _restore_project_results(project_id: str) -> None:
-    """Load the latest saved outputs for a project into the current browser session."""
-    for module, state_key in [
-        ("market", "market_result"),
-        ("operations", "ops_result"),
-        ("marketing", "marketing_result"),
-        ("finance", "finance_result"),
-    ]:
-        try:
-            run = get_latest_module_result(project_id, module)
-        except Exception:
-            run = None
-        if not run:
-            continue
-        result = run.get("result") or {}
-        if module == "marketing" and isinstance(result.get("ranked"), list):
-            result["ranked"] = pd.DataFrame(result["ranked"])
-        st.session_state[state_key] = result
-        if module == "market":
-            st.session_state["market_last_query"] = run.get("input_snapshot") or {}
-
-
-def activate_project(project_id: str | None) -> None:
-    if project_id == st.session_state.get("active_project_id") and st.session_state.get("_active_project_loaded") == project_id:
-        return
-    _clear_project_widget_state()
-    st.session_state["active_project_id"] = project_id
-    st.session_state["_active_project_loaded"] = project_id
-    if project_id:
-        _restore_project_results(project_id)
-
-
-def _persist_market_run(project_id: str, result: dict, snapshot: dict) -> None:
-    update_project(
-        project_id,
-        product_name=snapshot.get("product", ""),
-        target_market=snapshot.get("country", "Brazil"),
-        selected_platform=snapshot.get("platform", ""),
-    )
-    run = save_module_result(project_id, "market", result, input_snapshot=snapshot)
-    try:
-        save_market_evidence(project_id, run.get("id"), result.get("evidence") or [])
-    except Exception:
-        pass
-    version = int(run.get("version", 1))
-    try:
-        docx = generate_market_docx(result, lang_code)
-        pdf = generate_market_pdf(result, lang_code)
-        base = f"market_research_v{version}"
-        save_generated_report(
-            project_id, "market", "market_research_docx", base + ".docx", docx,
-            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            version=version,
-        )
-        save_generated_report(
-            project_id, "market", "market_research_pdf", base + ".pdf", pdf,
-            mime_type="application/pdf", version=version,
-        )
-    except Exception:
-        pass
 
 
 def localized_route_copy(module_name: str) -> str:
@@ -1227,66 +1050,6 @@ def localized_route_copy(module_name: str) -> str:
         },
     }
     return copy[lang_code].get(module_name, copy[lang_code]["market"])
-
-
-# =========================================================
-# Persistent Project Memory / Authentication
-# =========================================================
-# Supabase is optional for local development. When configured, users get
-# private persistent projects. Without it, the same UI works session-only.
-_auth_user = current_user() if PERSISTENCE_CONFIGURED else None
-
-if PERSISTENCE_CONFIGURED and AUTH_REQUIRED and _auth_user is None:
-    st.markdown(
-        """
-        <div class="bcos-hero">
-            <div class="bcos-kicker">PROJECT MEMORY</div>
-            <h1>Brazil Commerce OS</h1>
-            <p>Sign in to keep multiple market-entry projects, reports, uploaded files and progress in one private workspace.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    login_tab, signup_tab = st.tabs(["Sign in / 登录", "Create account / 注册"])
-    with login_tab:
-        login_email = st.text_input("Email", key="auth_login_email")
-        login_password = st.text_input("Password", type="password", key="auth_login_password")
-        if st.button("Sign in", type="primary", key="auth_signin"):
-            try:
-                sign_in(login_email, login_password)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Sign in failed: {e}")
-    with signup_tab:
-        signup_email = st.text_input("Email", key="auth_signup_email")
-        signup_password = st.text_input("Password (8+ characters)", type="password", key="auth_signup_password")
-        if st.button("Create account", key="auth_signup"):
-            if len(signup_password) < 8:
-                st.error("Please use at least 8 characters.")
-            else:
-                try:
-                    _, signed_in = sign_up(signup_email, signup_password)
-                    if signed_in:
-                        st.rerun()
-                    else:
-                        st.success("Account created. Check your email to confirm the account, then sign in.")
-                except Exception as e:
-                    st.error(f"Sign up failed: {e}")
-    st.stop()
-
-if not PERSISTENCE_CONFIGURED:
-    st.session_state.setdefault("_memory_setup_notice", True)
-
-try:
-    _projects = list_projects()
-except Exception as _project_error:
-    _projects = []
-    st.session_state["_project_store_error"] = str(_project_error)
-
-if _projects and not st.session_state.get("active_project_id"):
-    activate_project(_projects[0]["id"])
-
-_active_project = get_project(st.session_state.get("active_project_id")) if st.session_state.get("active_project_id") else None
 
 
 # =========================================================
@@ -1323,44 +1086,6 @@ with st.sidebar:
         st.session_state.ui_language = selected_language
         st.rerun()
 
-    st.markdown("---")
-    project_label = {"zh": "当前 Project", "en": "Current project", "pt-BR": "Projeto atual"}[lang_code]
-    no_project_label = {"zh": "尚未创建 Project", "en": "No project yet", "pt-BR": "Nenhum projeto ainda"}[lang_code]
-    project_rows = list_projects()
-    project_ids = [p["id"] for p in project_rows]
-    project_names = {p["id"]: p["project_name"] for p in project_rows}
-
-    if project_ids:
-        current_id = st.session_state.get("active_project_id")
-        if current_id not in project_ids:
-            current_id = project_ids[0]
-        selected_project = st.selectbox(
-            project_label,
-            options=project_ids,
-            index=project_ids.index(current_id),
-            format_func=lambda pid: project_names.get(pid, pid),
-            key="project_switcher",
-        )
-        if selected_project != st.session_state.get("active_project_id"):
-            activate_project(selected_project)
-            st.rerun()
-    else:
-        st.caption(no_project_label)
-
-    new_project_label = {"zh": "＋ 新建 Project", "en": "＋ New project", "pt-BR": "＋ Novo projeto"}[lang_code]
-    with st.expander(new_project_label, expanded=not bool(project_ids)):
-        np_name = st.text_input({"zh": "Project 名称 *", "en": "Project name *", "pt-BR": "Nome do projeto *"}[lang_code], key="new_project_name")
-        np_product = st.text_input({"zh": "产品 / 服务", "en": "Product / service", "pt-BR": "Produto / serviço"}[lang_code], key="new_project_product")
-        np_market = st.text_input({"zh": "目标市场", "en": "Target market", "pt-BR": "Mercado-alvo"}[lang_code], value="Brazil", key="new_project_market")
-        np_category = st.text_input({"zh": "品类（选填）", "en": "Category (optional)", "pt-BR": "Categoria (opcional)"}[lang_code], key="new_project_category")
-        if st.button({"zh": "创建 Project", "en": "Create project", "pt-BR": "Criar projeto"}[lang_code], type="primary", key="create_project_btn"):
-            try:
-                row = create_project(np_name, np_product, np_market, np_category)
-                activate_project(row["id"])
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
     module = st.radio(
         t["workspace"],
         NAV_OPTIONS,
@@ -1370,18 +1095,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    memory_text = {
-        "zh": "Project Memory：云端已连接" if persistence_mode() == "supabase" else "Project Memory：当前会话",
-        "en": "Project Memory: cloud connected" if persistence_mode() == "supabase" else "Project Memory: session only",
-        "pt-BR": "Project Memory: nuvem conectada" if persistence_mode() == "supabase" else "Project Memory: somente sessão",
-    }[lang_code]
-    st.caption(memory_text)
-    if PERSISTENCE_CONFIGURED and _auth_user is not None:
-        st.caption(_auth_user.email)
-        if st.button({"zh": "退出登录", "en": "Sign out", "pt-BR": "Sair"}[lang_code], key="auth_signout_btn"):
-            sign_out()
-            st.session_state["active_project_id"] = None
-            st.rerun()
     st.caption(t["ai_status"])
 
     llm_text = t["ai_demo"] if DEMO_MODE else t["ai_live"]
@@ -1414,56 +1127,6 @@ if module == "command":
         """,
         unsafe_allow_html=True,
     )
-
-    active_project_id = st.session_state.get("active_project_id")
-    active_project = get_project(active_project_id) if active_project_id else None
-    if active_project:
-        statuses = {x["module"]: x for x in get_module_statuses(active_project_id)}
-        st.markdown(
-            f"""
-            <div class="bcos-panel">
-                <div class="bcos-eyebrow">ACTIVE PROJECT</div>
-                <div class="bcos-card-title">{escape(active_project.get('project_name',''))}</div>
-                <div class="bcos-card-desc">{escape(active_project.get('product_name','') or 'Product not set')} · {escape(active_project.get('target_market','Brazil'))}</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-        c1, c2, c3, c4 = st.columns(4)
-        for col, key, label in [
-            (c1, "market", "01 Market"),
-            (c2, "operations", "02 Operations"),
-            (c3, "marketing", "03 Creator"),
-            (c4, "finance", "04 Finance"),
-        ]:
-            row = statuses.get(key, {})
-            value = str(row.get("status", "not_started")).replace("_", " " ).title()
-            col.metric(label, value, f"{int(row.get('progress_percent',0) or 0)}%")
-
-        continue_stage = active_project.get("current_stage") or "market"
-        if st.button({"zh": "继续当前 Project", "en": "Continue project", "pt-BR": "Continuar projeto"}[lang_code], key="continue_project_btn"):
-            go_to_module(continue_stage)
-            st.rerun()
-
-        with st.expander({"zh": "Project 资料与已保存文件", "en": "Project details & saved files", "pt-BR": "Detalhes e arquivos do projeto"}[lang_code], expanded=False):
-            ep1, ep2 = st.columns(2)
-            edit_product = ep1.text_input("Product", value=active_project.get("product_name", ""), key="edit_project_product")
-            edit_market = ep2.text_input("Market", value=active_project.get("target_market", "Brazil"), key="edit_project_market")
-            ep3, ep4 = st.columns(2)
-            edit_category = ep3.text_input("Category", value=active_project.get("category", ""), key="edit_project_category")
-            edit_platform = ep4.text_input("Selected platform", value=active_project.get("selected_platform", ""), key="edit_project_platform")
-            if st.button({"zh": "保存 Project 资料", "en": "Save project details", "pt-BR": "Salvar detalhes"}[lang_code], key="save_project_meta"):
-                update_project(active_project_id, product_name=edit_product, target_market=edit_market, category=edit_category, selected_platform=edit_platform)
-                st.success("Saved")
-            try:
-                saved_files = list_project_files(active_project_id)
-                if saved_files:
-                    st.dataframe(pd.DataFrame(saved_files)[[c for c in ["module","file_name","source_kind","size_bytes","created_at"] if c in pd.DataFrame(saved_files).columns]], use_container_width=True, hide_index=True)
-                else:
-                    st.caption("No saved files yet.")
-            except Exception as e:
-                st.caption(f"Files unavailable: {e}")
-    elif not PERSISTENCE_CONFIGURED:
-        st.info("Project Memory is currently session-only. Add Supabase settings to Streamlit Secrets for durable multi-project storage.")
 
     section_header("COMMAND CENTER", t["home_title"], t["home_subtitle"])
 
@@ -1548,14 +1211,13 @@ elif module == "market":
         with c1:
             country = st.text_input(
                 mu["market"],
-                value=st.session_state.get("market_country_value", (_active_project or {}).get("target_market", "Brazil")),
+                value=st.session_state.get("market_country_value", "Brazil"),
                 help=mu["market_help"],
                 key="market_country",
             )
         with c2:
             product = st.text_input(
                 mu["product"],
-                value=st.session_state.get("market_product_value", (_active_project or {}).get("product_name", "")),
                 placeholder=mu["product_ph"],
                 key="market_product",
             )
@@ -1622,11 +1284,6 @@ elif module == "market":
                     "objective": base_objective,
                 }
                 save_history("Market", product[:80], f"{country.strip()} | {result.get('mode', '')}")
-                if st.session_state.get("active_project_id"):
-                    try:
-                        _persist_market_run(st.session_state["active_project_id"], result, st.session_state["market_last_query"])
-                    except Exception as e:
-                        st.warning(f"Project save failed: {e}")
 
     result = st.session_state.market_result
     if result:
@@ -1700,7 +1357,7 @@ elif module == "market":
         try:
             docx_bytes = generate_market_docx(result, lang_code)
             pdf_bytes = generate_market_pdf(result, lang_code)
-            d1, d2 = st.columns(2)
+            d1, d2, d3 = st.columns(3)
             d1.download_button(
                 dl_labels[0],
                 data=docx_bytes,
@@ -1715,6 +1372,14 @@ elif module == "market":
                 file_name=filename_base + ".pdf",
                 mime="application/pdf",
                 key="download_market_pdf",
+                use_container_width=True,
+            )
+            d3.download_button(
+                dl_labels[2],
+                data=(result.get("analysis") or "").encode("utf-8"),
+                file_name=filename_base + ".md",
+                mime="text/markdown",
+                key="download_market_md",
                 use_container_width=True,
             )
         except Exception as e:
@@ -1755,7 +1420,7 @@ elif module == "operations":
     sku = ensure_internal_id("ops_sku_internal_id", "SKU")
 
     a, b = st.columns(2)
-    product_name = a.text_input(t["product_name"], value=(_active_project or {}).get("product_name", ""), placeholder=t["product_name_ph"], key="ops_product_name")
+    product_name = a.text_input(t["product_name"], placeholder=t["product_name_ph"], key="ops_product_name")
     platform = b.selectbox(
         t["platform"],
         ["Mercado Livre", "TikTok Shop", "Amazon BR", "Shopee BR"],
@@ -1810,66 +1475,18 @@ elif module == "operations":
                 )
             st.session_state.ops_result = result
             save_history("Operations", product_name[:80], platform)
-            if st.session_state.get("active_project_id"):
-                try:
-                    missing_count = len(result.get("missing") or [])
-                    update_project(st.session_state["active_project_id"], product_name=product_name.strip(), selected_platform=platform)
-                    save_module_result(
-                        st.session_state["active_project_id"],
-                        "operations",
-                        result,
-                        input_snapshot={
-                            "product_name": product_name.strip(), "platform": platform,
-                            "selling_price": selling_price.strip(), "inventory": inventory.strip(),
-                        },
-                        status="completed" if missing_count == 0 else "in_progress",
-                        progress_percent=100 if missing_count == 0 else 70,
-                        missing_count=missing_count,
-                    )
-                except Exception as e:
-                    st.warning(f"Project save failed: {e}")
 
     result = st.session_state.ops_result
     if result:
         if result.get("missing"):
             st.warning(f"{t['missing']}: " + ", ".join(result["missing"]))
         st.markdown(f"### {t['launch_pack']}")
-
-content = result.get("generated_pack") or ""
-
-st.markdown(content)
-
-if content.strip():
-    report_title = f"Launch Pack — {result.get('sku', 'SKU')}"
-
-    word_bytes = build_word_report(
-        report_title,
-        content,
-    )
-
-    pdf_bytes = build_pdf_report(
-        report_title,
-        content,
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.download_button(
-            "Download Word Report",
-            data=word_bytes,
-            file_name=f"launch_pack_{result.get('sku', 'SKU')}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="download_launch_word",
-        )
-
-    with col2:
-        st.download_button(
-            "Download PDF Report",
-            data=pdf_bytes,
-            file_name=f"launch_pack_{result.get('sku', 'SKU')}.pdf",
-            mime="application/pdf",
-            key="download_launch_pdf",
+        st.markdown(result.get("generated_pack") or "")
+        download_markdown(
+            t["download_launch"],
+            result.get("generated_pack") or "",
+            f"launch_pack_{result.get('sku', 'SKU')}.md",
+            "download_launch_pack",
         )
 
 
@@ -1932,7 +1549,7 @@ elif module == "marketing":
 
     campaign_id = ensure_internal_id("mkt_campaign_internal_id", "CMP")
 
-    product = st.text_input(ui["product"], value=(_active_project or {}).get("product_name", ""), placeholder=ui["product_ph"], key="mkt_product")
+    product = st.text_input(ui["product"], placeholder=ui["product_ph"], key="mkt_product")
 
     c1, c2, c3 = st.columns(3)
     objective = c1.selectbox(
@@ -1941,7 +1558,7 @@ elif module == "marketing":
         format_func=lambda x: CAMPAIGN_OBJECTIVE_LABELS[lang_code][x],
         key="mkt_objective",
     )
-    category = c2.text_input(t["category"], value=(_active_project or {}).get("category", ""), placeholder=t["category_ph"], key="mkt_category")
+    category = c2.text_input(t["category"], placeholder=t["category_ph"], key="mkt_category")
     budget = c3.number_input(
         t["creator_budget"],
         min_value=0.0,
@@ -2025,43 +1642,6 @@ elif module == "marketing":
                         "profile": profile,
                     }
                     save_history("Marketing", product[:80], f"{len(creator_df)} creators | fit={profile.get('fit_level')}")
-                    if st.session_state.get("active_project_id"):
-                        try:
-                            creator_file_row = upload_project_file(
-                                st.session_state["active_project_id"], "marketing", creator_file.name, creator_file.getvalue(),
-                                mime_type=getattr(creator_file, "type", None),
-                                source_kind="creator_dataset",
-                                metadata={"rows": len(creator_df), "category": category.strip()},
-                            )
-                            try:
-                                save_creator_records(
-                                    st.session_state["active_project_id"],
-                                    creator_df.to_dict(orient="records"),
-                                    source_file_id=creator_file_row.get("id"),
-                                )
-                            except Exception:
-                                pass
-                            persisted_marketing = {
-                                "ranked": ranked.head(10).to_dict(orient="records"),
-                                "explanation": explanation,
-                                "campaign_id": campaign_id,
-                                "profile": profile,
-                            }
-                            status = "completed" if profile.get("can_shortlist") else "waiting_for_data"
-                            save_module_result(
-                                st.session_state["active_project_id"], "marketing", persisted_marketing,
-                                input_snapshot={
-                                    "product": product.strip(), "category": category.strip(),
-                                    "objective": objective, "budget_brl": budget,
-                                    "source_file": creator_file.name,
-                                },
-                                status=status,
-                                progress_percent=100 if profile.get("can_shortlist") else 45,
-                                missing_count=0 if profile.get("can_shortlist") else 1,
-                            )
-                            update_project(st.session_state["active_project_id"], product_name=product.strip(), category=category.strip())
-                        except Exception as e:
-                            st.warning(f"Project save failed: {e}")
 
     result = st.session_state.marketing_result
     if result:
@@ -2151,28 +1731,6 @@ Rules:
                         "filename": finance_file.name,
                     }
                     save_history("Finance", finance_file.name[:80], f"{len(finance_df)} rows")
-                    if st.session_state.get("active_project_id"):
-                        try:
-                            upload_project_file(
-                                st.session_state["active_project_id"], "finance", finance_file.name, finance_file.getvalue(),
-                                mime_type=getattr(finance_file, "type", None),
-                                source_kind="finance_dataset",
-                                metadata={"rows": len(finance_df)},
-                            )
-                            missing = calc.get("missing_for_profitability") or []
-                            finance_run = save_module_result(
-                                st.session_state["active_project_id"], "finance", st.session_state.finance_result,
-                                input_snapshot={"source_file": finance_file.name, "rows": len(finance_df)},
-                                status="completed" if not missing else "waiting_for_data",
-                                progress_percent=100 if not missing else 60,
-                                missing_count=len(missing),
-                            )
-                            try:
-                                save_finance_metrics(st.session_state["active_project_id"], finance_run.get("id"), calc)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            st.warning(f"Project save failed: {e}")
 
     result = st.session_state.finance_result
     if result:
@@ -2223,16 +1781,6 @@ Rules:
 elif module == "audit":
     section_header("AUDIT", t["audit_title"], t["audit_sub"])
 
-    active_project_id = st.session_state.get("active_project_id")
-    if active_project_id:
-        try:
-            persistent_activity = list_activity(active_project_id, limit=100)
-            if persistent_activity:
-                st.markdown("### Project activity")
-                st.dataframe(pd.DataFrame(persistent_activity), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.caption(f"Persistent activity unavailable: {e}")
-
     if not st.session_state.history:
         empty_state(t["no_history"])
     else:
@@ -2245,3 +1793,4 @@ elif module == "audit":
             st.session_state.history = []
             st.success(t["history_cleared"])
             st.rerun()
+
