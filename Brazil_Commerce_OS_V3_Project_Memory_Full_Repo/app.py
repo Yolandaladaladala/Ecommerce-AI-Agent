@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import uuid
 import re
+from docx.shared import Pt
 from html import escape
 from pathlib import Path
 from io import BytesIO
@@ -1038,7 +1039,7 @@ def build_launch_word(title: str, content: str) -> bytes:
     p.alignment = 1
     run = p.add_run(title)
     run.bold = True
-    run.font.size = 22
+    run.font.size = Pt(22)
 
     doc.add_paragraph()
 
@@ -2134,99 +2135,8 @@ elif module == "marketing":
 # 04 Finance & Performance
 # =========================================================
 elif module == "finance":
-    section_header("04 · FINANCE & PERFORMANCE", t["finance_title"], t["finance_sub"])
-
-    finance_file = st.file_uploader(
-        t["upload_finance"],
-        type=["csv", "xlsx", "xls", "json"],
-        key="finance_file_uploader",
-    )
-
-    if finance_file is None:
-        empty_state(t["finance_empty"])
-    else:
-        try:
-            finance_df = load_finance_file(finance_file)
-        except Exception as e:
-            st.error(str(e))
-            finance_df = None
-
-        if finance_df is not None:
-            st.dataframe(finance_df.head(20), use_container_width=True, hide_index=True)
-
-            if st.button(t["run_finance"], type="primary", key="run_finance_btn"):
-                try:
-                    with st.spinner(t["analysing_finance"]):
-                        calc = analyse_finance(finance_df)
-                        advisor_prompt = f"""
-{ai_lang_instruction()}
-
-The deterministic Finance tool already calculated the following results:
-{calc}
-
-Explain only from these calculated results and the stated missing fields.
-Return:
-1. What is available vs incomplete
-2. The most important business drivers
-3. A maximum of 3 practical next actions
-
-Rules:
-- Do NOT freely recalculate or invent numbers.
-- Do NOT treat missing cost fields as zero.
-- Clearly separate observed/calculated facts from interpretation.
-"""
-                        advisor = chat(advisor_prompt)
-                except Exception as e:
-                    st.error(str(e))
-                else:
-                    st.session_state.finance_result = {
-                        "calc": calc,
-                        "advisor": advisor,
-                        "filename": finance_file.name,
-                    }
-                    save_history("Finance", finance_file.name[:80], f"{len(finance_df)} rows")
-
-    result = st.session_state.finance_result
-    if result:
-        calc = result["calc"]
-        a, b, c, d = st.columns(4)
-        a.metric(t["net_sales"], f"R$ {calc['net_sales']:,.0f}")
-        b.metric(t["aov"], t["incomplete"] if calc["aov"] is None else f"R$ {calc['aov']:,.2f}")
-        c.metric(t["roas"], t["incomplete"] if calc["roas"] is None else f"{calc['roas']:.2f}")
-        d.metric(
-            t["contribution_profit"],
-            t["incomplete"] if calc["contribution_profit"] is None else f"R$ {calc['contribution_profit']:,.0f}",
-        )
-
-        if calc.get("missing_for_profitability"):
-            st.warning(
-                f"Profitability = {t['incomplete']}. {t['missing']}: "
-                + ", ".join(calc["missing_for_profitability"])
-            )
-        elif calc.get("contribution_margin") is not None:
-            st.success(f"{t['contribution_margin']} = {calc['contribution_margin']:.1%}")
-
-        with st.expander(t["field_mapping"], expanded=False):
-            st.json(calc.get("mapping", {}))
-
-        st.markdown(f"### {t['ai_advisor']}")
-        st.markdown(result.get("advisor") or "")
-        download_markdown(
-            t["download_finance_analysis"],
-            result.get("advisor") or "",
-            f"finance_analysis_{result.get('filename', 'analysis')}.md",
-            "download_finance_analysis",
-        )
-
-    template_bytes = safe_template_bytes(BASE / "data" / "finance_sample.csv")
-    if template_bytes is not None:
-        st.download_button(
-            t["download_finance_template"],
-            data=template_bytes,
-            file_name="finance_sample.csv",
-            mime="text/csv",
-            key="download_finance_template",
-        )
+    from tools.finance_workspace import render_finance
+    render_finance(BASE, ai_lang_instruction(), build_launch_word, build_launch_pdf, save_history)
 
 
 # =========================================================
