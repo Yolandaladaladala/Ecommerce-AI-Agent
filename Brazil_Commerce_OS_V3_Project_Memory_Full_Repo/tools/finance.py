@@ -560,3 +560,119 @@ def analyse_finance(df: pd.DataFrame) -> Dict[str, Any]:
         "row_count": int(len(df)),
     }
 
+
+# Section 4 update: completeness-aware parsing and calculation.
+_legacy_analyse = analyse_finance
+
+def _normalise_name(name):
+    import re
+    s = str(name).strip()
+    match = re.search(r'\(([a-z_]+)\)\s*$', s)
+    if match:
+        return match.group(1)
+    return s.lower().replace('-', '_').replace('/', '_').replace(' ', '_')
+
+def _to_numeric(series):
+    import re
+    def parse(v):
+        if pd.isna(v): return float('nan')
+        if isinstance(v, (int, float)): return float(v)
+        s = re.sub(r'[^0-9,.()\-]', '', str(v).strip())
+        if not s: return float('nan')
+        if s.startswith('(') and s.endswith(')'): s = '-' + s[1:-1]
+        if ',' in s and '.' in s:
+            s = s.replace('.', '').replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
+        elif ',' in s:
+            parts = s.split(',')
+            s = s.replace(',', '.') if len(parts) == 2 and len(parts[-1]) in (1, 2) else s.replace(',', '')
+        elif s.count('.') > 1: s = s.replace('.', '')
+        try: return float(s)
+        except ValueError: return float('nan')
+    return series.map(parse)
+
+def analyse_finance(df, price_basis='total', cost_basis='total', confirmed_zero=None):
+    x = _normalise_columns(df)
+    confirmed_zero = set(confirmed_zero or [])
+    mapping = _build_mapping(x)
+    if not mapping['revenue']:
+        price = _first_existing(x.columns, ['price', 'selling_price', '成交价', '售价'])
+        if price:
+            values = _to_numeric(x[price])
+            if price_basis == 'unit':
+                q = mapping.get('quantity')
+                if not q: raise ValueError('单价需要 quantity/qty 列；请提供数量或选择订单总额。')
+                values = values * _to_numeric(x[q])
+            x['revenue'] = values
+    mapping = _build_mapping(x)
+    if cost_basis == 'unit' and mapping.get('product_cost'):
+        q = mapping.get('quantity')
+        if not q: raise ValueError('单件成本需要数量列。')
+        x['product_cost'] = _to_numeric(x[mapping['product_cost']]) * _to_numeric(x[q])
+    for field in confirmed_zero:
+        col = _build_mapping(x).get(field)
+        if not col: x[field] = 0.0
+        # An explicit whole-field zero does not fill partially missing columns.
+    mapping = _build_mapping(x)
+    rev_col = mapping.get('revenue')
+    if not rev_col: raise ValueError('未识别成交金额；需要 revenue/sales/GMV/price。')
+    if _to_numeric(x[rev_col]).isna().any():
+        raise ValueError('成交金额存在空白或无法解析的值，请修正后再算总收入。')
+    # Already-net revenue must not have deductions subtracted a second time.
+    already_net = rev_col == 'net_sales'
+    if already_net:
+        for field in ('discounts', 'refunds'):
+            col = mapping.get(field)
+            if col: x[col] = 0.0
+    calc = _legacy_analyse(x)
+    quality = []
+    required = ['product_cost','platform_fee','logistics_cost','ad_spend','creator_cost','tax']
+    if not already_net: required += ['discounts','refunds']
+    numeric = {}
+    for field in ['revenue'] + required + ['software_cost']:
+        col = mapping.get(field)
+        vals = _to_numeric(x[col]) if col else pd.Series(float('nan'), index=x.index)
+        numeric[field] = vals
+        missing = int(vals.isna().sum())
+        quality.append({'field':field,'source_column':col or '', 'known_rows':len(x)-missing,'missing_rows':missing,'known_subtotal':float(vals.sum()) if vals.notna().any() else None})
+    missing = [r['field'] for r in quality if r['field'] in required and r['missing_rows']]
+    calc['missing_for_profitability'] = missing
+    calc['contribution_profit'] = None
+    calc['contribution_margin'] = None
+    if not missing:
+        cp = calc['net_sales'] - sum(float(numeric[f].sum()) for f in required if f not in ('discounts','refunds'))
+        calc['contribution_profit'] = cp
+        calc['contribution_margin'] = cp / calc['net_sales'] if calc['net_sales'] else None
+    calc['net_sales_complete'] = already_net or not any(f in missing for f in ['discounts','refunds'])
+    calc['quality'] = quality
+    calc['roas'] = None # No attributed revenue: total store sales is not ad ROAS.
+    calc['data_quality_notes'].append('ROAS未计算：需要广告归因收入，不能用全店销售额代替。')
+    if already_net: calc['data_quality_notes'].append('输入为net_sales，已阻止重复扣减；不将该值称为毛销售额。')
+    if missing: calc['data_quality_notes'].append('缺失项或部分空值未当成零；已知成本余额不是完整利润。')
+    net = numeric['revenue'].copy()
+    if not already_net:
+        for f in ['discounts','refunds']: net = net - numeric[f]
+    gross = net - numeric['product_cost']
+    calc['gross_profit'] = float(gross.sum()) if gross.notna().all() else None
+    calc['gross_margin'] = calc['gross_profit']/calc['net_sales'] if calc['gross_profit'] is not None and calc['net_sales'] else None
+    calc['gross_profit_known_rows'] = int(gross.notna().sum())
+    detail = x.copy()
+    detail['net_sales_calculated'] = net
+    detail['gross_profit_calculated'] = gross
+    detail['contribution_calculated'] = net.copy()
+    for f in ['product_cost','platform_fee','logistics_cost','ad_spend','creator_cost','tax']:
+        detail['contribution_calculated'] -= numeric[f]
+    calc['detail'] = detail
+    calc['currency'] = str(x[mapping['currency']].dropna().iloc[0]) if mapping.get('currency') and x[mapping['currency']].notna().any() else '未提供'
+    calc['group_analysis'] = {}
+    for dim in ['platform','sku']:
+        col=mapping.get(dim)
+        if col:
+            groups=[]
+            for key,g in detail.groupby(col,dropna=False):
+                r={'group':str(key),'rows':len(g)}
+                for f in ['net_sales_calculated','gross_profit_calculated','contribution_calculated']:
+                    r[f]=float(g[f].sum()) if g[f].notna().all() else None
+                groups.append(r)
+            calc['group_analysis'][dim]=groups
+    return calc
+
