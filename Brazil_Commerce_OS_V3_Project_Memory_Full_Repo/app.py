@@ -4,6 +4,13 @@ from datetime import datetime
 import uuid
 from html import escape
 from pathlib import Path
+from io import BytesIO
+
+from docx import Document
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 import pandas as pd
 import streamlit as st
@@ -12,7 +19,7 @@ from agent import route_request
 from tools.market import run_market_research
 from tools.report_generator import generate_market_docx, generate_market_pdf
 from tools.operations import run_operations
-from tools.marketing import load_creator_file, score_creators, explain_creator_fit, analyse_creator_dataset
+from tools.marketing import load_creator_file, score_creators, explain_creator_fit, analyse_creator_dataset, discover_creators
 from tools.finance import load_finance_file, analyse_finance
 from llm import chat
 from config import DEMO_MODE, SERPER_API_KEY
@@ -119,7 +126,7 @@ I18N = {
         "missing": "缺失字段",
         "launch_pack": "Launch Pack",
         "ops_language_note": "面向巴西消费者的 Listing 默认以巴西葡萄牙语生成，这是当前 Operations 工具的业务设定。",
-        "download_launch": "下载 Launch Pack (.md)",
+        "download_launch": "下载 Launch Pack",
         "marketing_title": "03 Marketing / Creator / Content",
         "marketing_sub": "整合 Creator 数据、筛选逻辑与 AI 分析，形成更清晰的达人选择和内容执行方案。",
         "campaign_id": "Campaign ID *",
@@ -248,7 +255,7 @@ I18N = {
         "missing": "Missing fields",
         "launch_pack": "Launch Pack",
         "ops_language_note": "Consumer-facing Brazil listings are generated in Brazilian Portuguese by design in the current Operations tool.",
-        "download_launch": "Download Launch Pack (.md)",
+        "download_launch": "Download Launch Pack",
         "marketing_title": "03 Marketing / Creator / Content",
         "marketing_sub": "Real creator data → deterministic scoring → AI fit explanation. No real data means no invented creators.",
         "campaign_id": "Campaign ID *",
@@ -377,7 +384,7 @@ I18N = {
         "missing": "Campos ausentes",
         "launch_pack": "Pacote de Lançamento",
         "ops_language_note": "Os listings voltados ao consumidor brasileiro são gerados em português do Brasil por padrão no módulo atual de Operações.",
-        "download_launch": "Baixar pacote de lançamento (.md)",
+        "download_launch": "Baixar pacote de lançamento",
         "marketing_title": "03 Marketing / Criadores / Conteúdo",
         "marketing_sub": "Dados reais de criadores → scoring determinístico → explicação de fit por IA. Sem dados reais, sem criadores inventados.",
         "campaign_id": "Campaign ID *",
@@ -1021,6 +1028,125 @@ def download_markdown(label: str, content: str, filename: str, key: str) -> None
     )
 
 
+def build_launch_word(title: str, content: str) -> bytes:
+    """Convert the generated Launch Pack markdown-like text into a DOCX."""
+    buffer = BytesIO()
+    doc = Document()
+
+    p = doc.add_paragraph()
+    p.alignment = 1
+    run = p.add_run(title)
+    run.bold = True
+    run.font.size = 22
+
+    doc.add_paragraph()
+
+    for raw in content.splitlines():
+        line = raw.strip()
+
+        if not line:
+            doc.add_paragraph()
+            continue
+
+        if line.startswith("### "):
+            doc.add_heading(line[4:].strip(), level=3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith("# "):
+            doc.add_heading(line[2:].strip(), level=1)
+        elif re.match(r"^[-*]\s+", line):
+            doc.add_paragraph(re.sub(r"^[-*]\s+", "", line), style="List Bullet")
+        elif re.match(r"^\d+\.\s+", line):
+            doc.add_paragraph(re.sub(r"^\d+\.\s+", "", line), style="List Number")
+        else:
+            clean = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+            doc.add_paragraph(clean)
+
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _launch_pdf_font() -> str:
+    """Use a built-in CID font so Chinese text can render in PDF."""
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        return "STSong-Light"
+    except Exception:
+        return "Helvetica"
+
+
+def build_launch_pdf(title: str, content: str) -> bytes:
+    """Convert the generated Launch Pack markdown-like text into a PDF."""
+    buffer = BytesIO()
+    font_name = _launch_pdf_font()
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "LaunchTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=20,
+        leading=25,
+        alignment=TA_CENTER,
+        spaceAfter=14,
+    )
+    body_style = ParagraphStyle(
+        "LaunchBody",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=9.5,
+        leading=14,
+        spaceAfter=5,
+    )
+    h1 = ParagraphStyle("LaunchH1", parent=styles["Heading1"], fontName=font_name, fontSize=16, leading=20, spaceAfter=8)
+    h2 = ParagraphStyle("LaunchH2", parent=styles["Heading2"], fontName=font_name, fontSize=13, leading=17, spaceAfter=6)
+    h3 = ParagraphStyle("LaunchH3", parent=styles["Heading3"], fontName=font_name, fontSize=11, leading=15, spaceAfter=5)
+
+    pdf = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=42,
+        leftMargin=42,
+        topMargin=46,
+        bottomMargin=46,
+        title=title,
+    )
+
+    story = [Paragraph(title, title_style), Spacer(1, 8)]
+
+    for raw in content.splitlines():
+        line = raw.strip()
+
+        if not line:
+            story.append(Spacer(1, 5))
+            continue
+
+        safe = (
+            line.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+        )
+        safe = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
+
+        if line.startswith("### "):
+            story.append(Paragraph(safe[4:], h3))
+        elif line.startswith("## "):
+            story.append(Paragraph(safe[3:], h2))
+        elif line.startswith("# "):
+            story.append(Paragraph(safe[2:], h1))
+        elif re.match(r"^[-*]\s+", line):
+            story.append(Paragraph("• " + re.sub(r"^[-*]\s+", "", safe), body_style))
+        else:
+            story.append(Paragraph(safe, body_style))
+
+    pdf.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def safe_template_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -1481,27 +1607,73 @@ elif module == "operations":
         if result.get("missing"):
             st.warning(f"{t['missing']}: " + ", ".join(result["missing"]))
         st.markdown(f"### {t['launch_pack']}")
-        st.markdown(result.get("generated_pack") or "")
-        download_markdown(
-            t["download_launch"],
-            result.get("generated_pack") or "",
-            f"launch_pack_{result.get('sku', 'SKU')}.md",
-            "download_launch_pack",
-        )
+
+        content = result.get("generated_pack") or ""
+        st.markdown(content)
+
+        if content.strip():
+            sku_value = result.get("sku", "SKU")
+            report_title = f"Launch Pack — {sku_value}"
+
+            word_bytes = build_launch_word(report_title, content)
+            pdf_bytes = build_launch_pdf(report_title, content)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.download_button(
+                    "Download Launch Pack (Word)",
+                    data=word_bytes,
+                    file_name=f"launch_pack_{sku_value}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="download_launch_word",
+                    use_container_width=True,
+                )
+
+            with col2:
+                st.download_button(
+                    "Download Launch Pack (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"launch_pack_{sku_value}.pdf",
+                    mime="application/pdf",
+                    key="download_launch_pdf",
+                    use_container_width=True,
+                )
+        else:
+            st.error("Launch Pack generation returned no content. Please check the LLM response before downloading.")
 
 
 # =========================================================
 # 03 Marketing / Creator / Content
 # =========================================================
 elif module == "marketing":
-    section_header("03 · MARKETING / CREATOR", t["marketing_title"], t["marketing_sub"])
+    section_header(
+        "03 · CREATOR DISCOVERY & CAMPAIGN INTELLIGENCE",
+        t["marketing_title"],
+        {
+            "zh": "Agent 可以自己搜索真实 Creator，也可以分析你已有的名单。先发现，再验证，再评分；不会为了凑 Top 10 编造达人。",
+            "en": "The agent can discover real creators or analyse your existing list. Discover first, verify next, then score — never invent creators to fill a Top 10.",
+            "pt-BR": "O agente pode descobrir creators reais ou analisar sua base existente. Primeiro descobre, depois verifica e só então pontua — sem inventar creators.",
+        }[lang_code],
+    )
 
     ui = {
         "zh": {
             "product": "产品 / 商品名称 *",
-            "product_ph": "例如：实木高性价比猫爬架",
+            "product_ph": "例如：90cm 猫爬架",
             "brief": "已确认的商品 / 品牌信息（选填）",
-            "brief_ph": "只填真实已确认的信息，例如材料、尺寸、卖点、禁用 claims。没有也可以先留空。",
+            "brief_ph": "只填写真实确认的信息，例如材料、尺寸、卖点、禁用 claims。没有也可以先留空。",
+            "tracking": "内部 Campaign ID（系统自动生成）",
+            "tab_discover": "AI 自动寻找 Creator",
+            "tab_upload": "分析已有 Creator 名单",
+            "market": "目标市场",
+            "platforms": "目标平台",
+            "target_n": "希望发现的候选 Creator 数量",
+            "discover": "Agent 开始寻找 Creator",
+            "discovering": "Agent 正在规划搜索 → 搜索真实账号 → 去重 → 检查相关性 → 必要时扩大搜索…",
+            "search_plan": "Agent Search Plan",
+            "search_log": "Search Execution Log",
+            "candidates": "发现的真实候选 Creator",
             "pool": "Creator 数据概览",
             "creators": "Creator 数量",
             "primary": "主要数据类别",
@@ -1509,47 +1681,80 @@ elif module == "marketing":
             "matched": "识别到的相关 Creator",
             "low": "当前 Creator 池与这个商品品类匹配度较低。系统不会为了凑 Top 10 强行推荐不相关达人。",
             "analyse": "分析 Creator 数据并生成建议",
-            "no_shortlist": "未生成 Creator Shortlist：当前数据不足以支持可靠的品类匹配。",
+            "no_shortlist": "未生成 Creator Shortlist：当前证据不足以支持可靠推荐。",
             "analysis": "Creator & Campaign Analysis",
-            "tracking": "内部 Campaign ID（系统自动生成）",
+            "source_note": "公开搜索找到的账号是真实来源候选，但搜索摘要不等于经过验证的粉丝量、GMV、报价或转化率。下一步应继续 enrichment / FastMoss 验证。",
+            "serper_note": "AI 自动寻找需要 SERPER_API_KEY。没有 Search API 时仍可使用“分析已有 Creator 名单”。",
+            "result_status": "Discovery Status",
         },
         "en": {
             "product": "Product / product name *",
-            "product_ph": "Example: value-for-money solid-wood cat tree",
+            "product_ph": "Example: 90 cm cat tree",
             "brief": "Confirmed product / brand facts (optional)",
-            "brief_ph": "Only confirmed facts such as materials, dimensions, selling points and prohibited claims. You may leave this blank initially.",
+            "brief_ph": "Only confirmed facts such as materials, dimensions, selling points and prohibited claims.",
+            "tracking": "Internal Campaign ID (auto-generated)",
+            "tab_discover": "AI Find Creators for Me",
+            "tab_upload": "Analyse My Creator List",
+            "market": "Target market",
+            "platforms": "Target platforms",
+            "target_n": "Target number of creator candidates",
+            "discover": "Agent: Discover Creators",
+            "discovering": "Agent is planning searches → finding real profiles → deduplicating → checking relevance → expanding if needed…",
+            "search_plan": "Agent Search Plan",
+            "search_log": "Search Execution Log",
+            "candidates": "Real Creator Candidates Discovered",
             "pool": "Creator dataset overview",
             "creators": "Creators",
             "primary": "Primary dataset niche",
             "fit": "Category fit",
             "matched": "Relevant creators detected",
-            "low": "The current creator pool has low relevance to this product category. The system will not force an irrelevant Top 10.",
-            "analyse": "Analyse creator data",
-            "no_shortlist": "No Creator Shortlist generated: the current data does not support a reliable category match.",
+            "low": "The current creator pool has low relevance. The system will not force an irrelevant Top 10.",
+            "analyse": "Analyse Creator Data",
+            "no_shortlist": "No Creator Shortlist generated: current evidence does not support a reliable recommendation.",
             "analysis": "Creator & Campaign Analysis",
-            "tracking": "Internal Campaign ID (auto-generated)",
+            "source_note": "Public search finds real sourced profile candidates, but search snippets do not verify followers, GMV, fees or conversion. Enrichment / FastMoss verification is still required.",
+            "serper_note": "Automatic discovery requires SERPER_API_KEY. Without search access, you can still use Analyse My Creator List.",
+            "result_status": "Discovery Status",
         },
         "pt-BR": {
             "product": "Produto / nome do produto *",
-            "product_ph": "Ex.: arranhador de madeira maciça com bom custo-benefício",
+            "product_ph": "Ex.: arranhador para gatos de 90 cm",
             "brief": "Fatos confirmados do produto / marca (opcional)",
-            "brief_ph": "Informe apenas fatos confirmados, como materiais, dimensões, diferenciais e claims proibidos. Pode deixar em branco inicialmente.",
+            "brief_ph": "Informe apenas fatos confirmados: materiais, dimensões, diferenciais e claims proibidos.",
+            "tracking": "Campaign ID interno (gerado automaticamente)",
+            "tab_discover": "IA encontra creators",
+            "tab_upload": "Analisar minha base de creators",
+            "market": "Mercado-alvo",
+            "platforms": "Plataformas-alvo",
+            "target_n": "Número-alvo de creators candidatos",
+            "discover": "Agente: descobrir creators",
+            "discovering": "Agente planejando buscas → encontrando perfis reais → removendo duplicados → verificando relevância → expandindo se necessário…",
+            "search_plan": "Plano de busca do agente",
+            "search_log": "Log de execução da busca",
+            "candidates": "Creators reais encontrados",
             "pool": "Visão geral da base de creators",
             "creators": "Creators",
             "primary": "Nicho principal da base",
             "fit": "Fit com a categoria",
             "matched": "Creators relevantes detectados",
-            "low": "A base atual tem baixa relevância para esta categoria. O sistema não vai forçar um Top 10 irrelevante.",
-            "analyse": "Analisar base de creators",
-            "no_shortlist": "Nenhuma shortlist foi gerada: os dados atuais não sustentam um match confiável de categoria.",
+            "low": "A base atual tem baixa relevância. O sistema não vai forçar um Top 10 irrelevante.",
+            "analyse": "Analisar dados de creators",
+            "no_shortlist": "Nenhuma shortlist foi gerada: as evidências atuais não sustentam uma recomendação confiável.",
             "analysis": "Análise de Creators e Campanha",
-            "tracking": "Campaign ID interno (gerado automaticamente)",
+            "source_note": "A busca pública encontra candidatos reais, mas snippets não verificam seguidores, GMV, fee ou conversão. Ainda é necessário enriquecer / validar no FastMoss.",
+            "serper_note": "A descoberta automática requer SERPER_API_KEY. Sem acesso à busca, ainda é possível analisar uma lista existente.",
+            "result_status": "Status da descoberta",
         },
     }[lang_code]
 
     campaign_id = ensure_internal_id("mkt_campaign_internal_id", "CMP")
 
-    product = st.text_input(ui["product"], placeholder=ui["product_ph"], key="mkt_product")
+    # Shared campaign inputs for both workflows.
+    product = st.text_input(
+        ui["product"],
+        placeholder=ui["product_ph"],
+        key="mkt_product",
+    )
 
     c1, c2, c3 = st.columns(3)
     objective = c1.selectbox(
@@ -1558,7 +1763,11 @@ elif module == "marketing":
         format_func=lambda x: CAMPAIGN_OBJECTIVE_LABELS[lang_code][x],
         key="mkt_objective",
     )
-    category = c2.text_input(t["category"], placeholder=t["category_ph"], key="mkt_category")
+    category = c2.text_input(
+        t["category"],
+        placeholder=t["category_ph"],
+        key="mkt_category",
+    )
     budget = c3.number_input(
         t["creator_budget"],
         min_value=0.0,
@@ -1574,96 +1783,340 @@ elif module == "marketing":
         key="mkt_brief",
     )
 
-    creator_file = st.file_uploader(
-        t["upload_creator"],
-        type=["csv", "xlsx", "xls"],
-        key="creator_file_uploader",
-    )
-
     with st.expander(ui["tracking"], expanded=False):
         st.code(campaign_id)
 
-    if creator_file is None:
-        empty_state(t["creator_empty"])
-    else:
-        try:
-            creator_df = load_creator_file(creator_file)
-        except Exception as e:
-            st.error(str(e))
-            creator_df = None
+    tab_discover, tab_upload = st.tabs([ui["tab_discover"], ui["tab_upload"]])
 
-        if creator_df is not None:
-            profile = analyse_creator_dataset(creator_df, category.strip())
-            primary_niche = profile["top_categories"][0]["value"] if profile.get("top_categories") else "—"
-            fit_label = profile.get("fit_level", "NOT_ASSESSED")
+    # -------------------------------------------------------------------------
+    # A) AGENTIC DISCOVERY MODE
+    # -------------------------------------------------------------------------
+    with tab_discover:
+        d1, d2, d3 = st.columns([1, 1.5, 1])
 
-            st.markdown(f"### {ui['pool']}")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric(ui["creators"], f"{profile['rows']:,}")
-            m2.metric(ui["primary"], primary_niche)
-            m3.metric(ui["fit"], fit_label.replace("_", " ").title())
-            m4.metric(ui["matched"], f"{profile['matched_count']:,}")
+        market = d1.text_input(
+            ui["market"],
+            value="Brazil",
+            key="mkt_discovery_market",
+        )
 
-            if category.strip() and not profile["can_shortlist"]:
-                st.warning(ui["low"])
+        platforms = d2.multiselect(
+            ui["platforms"],
+            ["TikTok", "Instagram", "YouTube", "Facebook", "Kwai"],
+            default=["TikTok", "Instagram"],
+            key="mkt_discovery_platforms",
+        )
 
-            preview_cols = [
-                c for c in ["display_name", "followers", "category", "platform", "profile_url", "content_focus", "research_status"]
-                if c in creator_df.columns
-            ]
-            preview = creator_df[preview_cols].head(30) if preview_cols else creator_df.head(30)
-            st.dataframe(preview, use_container_width=True, hide_index=True)
+        target_count = d3.slider(
+            ui["target_n"],
+            min_value=5,
+            max_value=50,
+            value=20,
+            step=5,
+            key="mkt_discovery_target",
+        )
 
-            if st.button(ui["analyse"], type="primary", key="build_shortlist_btn"):
-                if not product.strip() or not category.strip():
-                    st.error(t["required"])
-                else:
-                    ranked = score_creators(creator_df, category.strip(), budget if budget > 0 else None)
-                    profile = ranked.attrs.get("dataset_profile", profile)
-                    brief_for_agent = (
-                        (approved_brief.strip() or "No additional confirmed product facts were provided.")
-                        + "\n\nMETA OUTPUT LANGUAGE: "
-                        + ai_lang_instruction()
-                    )
-                    with st.spinner(t["analysing_fit"]):
+        st.caption(ui["source_note"])
+
+        if not SERPER_API_KEY:
+            st.info(ui["serper_note"])
+
+        if st.button(
+            ui["discover"],
+            type="primary",
+            key="discover_creators_btn",
+        ):
+            if not product.strip() or not category.strip() or not platforms:
+                st.error(t["required"])
+            else:
+                try:
+                    with st.spinner(ui["discovering"]):
+                        discovery = discover_creators(
+                            product=product.strip(),
+                            category=category.strip(),
+                            objective=objective,
+                            platforms=platforms,
+                            market=market.strip() or "Brazil",
+                            budget=budget if budget > 0 else None,
+                            target_count=target_count,
+                        )
+
+                        candidates = discovery.get("candidates")
+                        ranked = discovery.get("ranked")
+                        profile = discovery.get("profile") or {}
+
+                        brief_for_agent = (
+                            (approved_brief.strip() or "No additional confirmed product facts were provided.")
+                            + "\n\nMETA OUTPUT LANGUAGE: "
+                            + ai_lang_instruction()
+                        )
+
                         explanation = explain_creator_fit(
-                            ranked,
+                            ranked if ranked is not None else pd.DataFrame(),
                             campaign_id,
                             product.strip(),
                             objective,
                             brief_for_agent,
                             dataset_profile=profile,
-                            full_dataset=creator_df,
+                            full_dataset=candidates if candidates is not None else pd.DataFrame(),
+                            discovery_context={
+                                "status": discovery.get("status"),
+                                "rounds_used": discovery.get("rounds_used"),
+                                "target_count": target_count,
+                                "market": market,
+                                "platforms": platforms,
+                                "search_log": discovery.get("search_log", [])[:12],
+                            },
                         )
+
                     st.session_state.marketing_result = {
-                        "ranked": ranked.head(10),
+                        "mode": "discovery",
+                        "ranked": ranked.head(10) if ranked is not None else pd.DataFrame(),
+                        "candidates": candidates,
                         "explanation": explanation,
                         "campaign_id": campaign_id,
                         "profile": profile,
+                        "discovery": discovery,
                     }
-                    save_history("Marketing", product[:80], f"{len(creator_df)} creators | fit={profile.get('fit_level')}")
+                    save_history(
+                        "Marketing",
+                        product[:80],
+                        f"Agent discovery | {len(candidates) if candidates is not None else 0} candidates | {discovery.get('status')}",
+                    )
+                except Exception as e:
+                    st.error(str(e))
 
+        current = st.session_state.get("marketing_result")
+        if current and current.get("mode") == "discovery":
+            discovery = current.get("discovery") or {}
+            candidates = current.get("candidates")
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric(ui["result_status"], discovery.get("status", "—"))
+            s2.metric(
+                ui["creators"],
+                len(candidates) if candidates is not None else 0,
+            )
+            s3.metric(
+                ui["matched"],
+                (current.get("profile") or {}).get("matched_count", 0),
+            )
+
+            with st.expander(ui["search_plan"], expanded=False):
+                st.json(discovery.get("plan", {}))
+
+            with st.expander(ui["search_log"], expanded=False):
+                log_df = pd.DataFrame(discovery.get("search_log", []))
+                if not log_df.empty:
+                    st.dataframe(log_df, use_container_width=True, hide_index=True)
+
+            if candidates is not None and not candidates.empty:
+                st.markdown(f"### {ui['candidates']}")
+                candidate_cols = [
+                    c for c in [
+                        "display_name",
+                        "platform",
+                        "profile_url",
+                        "discovery_relevance",
+                        "content_focus",
+                        "research_status",
+                        "source",
+                    ]
+                    if c in candidates.columns
+                ]
+                st.dataframe(
+                    candidates[candidate_cols] if candidate_cols else candidates,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    # -------------------------------------------------------------------------
+    # B) ANALYSE EXISTING CREATOR LIST
+    # -------------------------------------------------------------------------
+    with tab_upload:
+        creator_file = st.file_uploader(
+            t["upload_creator"],
+            type=["csv", "xlsx", "xls"],
+            key="creator_file_uploader",
+        )
+
+        if creator_file is None:
+            empty_state(
+                {
+                    "zh": "如果你已经有 FastMoss / agency / CRM 名单，可以上传；如果没有，请使用左侧“AI 自动寻找 Creator”。",
+                    "en": "Upload a FastMoss / agency / CRM list if you already have one; otherwise use AI Find Creators for Me.",
+                    "pt-BR": "Envie uma base FastMoss / agência / CRM se já tiver; caso contrário use a descoberta automática.",
+                }[lang_code]
+            )
+        else:
+            try:
+                creator_df = load_creator_file(creator_file)
+            except Exception as e:
+                st.error(str(e))
+                creator_df = None
+
+            if creator_df is not None:
+                profile = analyse_creator_dataset(
+                    creator_df,
+                    category.strip(),
+                    product.strip(),
+                )
+                primary_niche = (
+                    profile["top_categories"][0]["value"]
+                    if profile.get("top_categories")
+                    else "—"
+                )
+                fit_label = profile.get("fit_level", "NOT_ASSESSED")
+
+                st.markdown(f"### {ui['pool']}")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(ui["creators"], f"{profile['rows']:,}")
+                m2.metric(ui["primary"], primary_niche)
+                m3.metric(ui["fit"], fit_label.replace("_", " ").title())
+                m4.metric(ui["matched"], f"{profile['matched_count']:,}")
+
+                if category.strip() and not profile["can_shortlist"]:
+                    st.warning(ui["low"])
+
+                preview_cols = [
+                    c for c in [
+                        "display_name", "followers", "category", "platform",
+                        "profile_url", "content_focus", "research_status",
+                    ]
+                    if c in creator_df.columns
+                ]
+                preview = (
+                    creator_df[preview_cols].head(30)
+                    if preview_cols
+                    else creator_df.head(30)
+                )
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+
+                if st.button(
+                    ui["analyse"],
+                    type="primary",
+                    key="build_shortlist_btn",
+                ):
+                    if not product.strip() or not category.strip():
+                        st.error(t["required"])
+                    else:
+                        ranked = score_creators(
+                            creator_df,
+                            category.strip(),
+                            budget if budget > 0 else None,
+                            product=product.strip(),
+                        )
+                        profile = ranked.attrs.get("dataset_profile", profile)
+
+                        brief_for_agent = (
+                            (approved_brief.strip() or "No additional confirmed product facts were provided.")
+                            + "\n\nMETA OUTPUT LANGUAGE: "
+                            + ai_lang_instruction()
+                        )
+
+                        with st.spinner(t["analysing_fit"]):
+                            explanation = explain_creator_fit(
+                                ranked,
+                                campaign_id,
+                                product.strip(),
+                                objective,
+                                brief_for_agent,
+                                dataset_profile=profile,
+                                full_dataset=creator_df,
+                                discovery_context={
+                                    "mode": "user_uploaded_creator_list",
+                                    "filename": creator_file.name,
+                                    "rows": len(creator_df),
+                                },
+                            )
+
+                        st.session_state.marketing_result = {
+                            "mode": "upload",
+                            "ranked": ranked.head(10),
+                            "explanation": explanation,
+                            "campaign_id": campaign_id,
+                            "profile": profile,
+                        }
+
+                        save_history(
+                            "Marketing",
+                            product[:80],
+                            f"{len(creator_df)} creators | fit={profile.get('fit_level')}",
+                        )
+
+    # -------------------------------------------------------------------------
+    # SHARED DECISION OUTPUT
+    # -------------------------------------------------------------------------
     result = st.session_state.marketing_result
+
     if result:
         ranked = result.get("ranked")
+
         if ranked is not None and not ranked.empty:
-            st.markdown(f"### {t['shortlist']}")
+            st.markdown(
+                {
+                    "zh": "### 推荐 Creator Shortlist",
+                    "en": "### Recommended Creator Shortlist",
+                    "pt-BR": "### Shortlist recomendada de creators",
+                }[lang_code]
+            )
+
             show_cols = [
-                c for c in ["display_name", "platform", "category", "followers", "avg_views", "engagement_rate", "gmv_30d", "fee_brl", "fit_score", "score_data_coverage", "profile_url"]
+                c for c in [
+                    "display_name",
+                    "platform",
+                    "category",
+                    "followers",
+                    "avg_views",
+                    "engagement_rate",
+                    "gmv_30d",
+                    "fee_brl",
+                    "fit_score",
+                    "data_confidence",
+                    "profile_url",
+                    "research_status",
+                ]
                 if c in ranked.columns
             ]
-            st.dataframe(ranked[show_cols] if show_cols else ranked, use_container_width=True, hide_index=True)
+
+            st.dataframe(
+                ranked[show_cols] if show_cols else ranked,
+                use_container_width=True,
+                hide_index=True,
+            )
         else:
             st.info(ui["no_shortlist"])
 
         st.markdown(f"### {ui['analysis']}")
-        st.markdown(result.get("explanation") or "")
-        download_markdown(
-            t["download_creator_analysis"],
-            result.get("explanation") or "",
-            f"creator_analysis_{result.get('campaign_id', 'campaign')}.md",
-            "download_creator_analysis",
-        )
+        analysis_text = result.get("explanation") or ""
+        st.markdown(analysis_text)
+
+        if analysis_text.strip():
+            report_title = f"Creator & Campaign Analysis — {result.get('campaign_id', 'campaign')}"
+            word_bytes = build_launch_word(report_title, analysis_text)
+            pdf_bytes = build_launch_pdf(report_title, analysis_text)
+
+            dl1, dl2 = st.columns(2)
+
+            with dl1:
+                st.download_button(
+                    "Download Creator Analysis (Word)",
+                    data=word_bytes,
+                    file_name=f"creator_analysis_{result.get('campaign_id', 'campaign')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="download_creator_analysis_word",
+                    use_container_width=True,
+                )
+
+            with dl2:
+                st.download_button(
+                    "Download Creator Analysis (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"creator_analysis_{result.get('campaign_id', 'campaign')}.pdf",
+                    mime="application/pdf",
+                    key="download_creator_analysis_pdf",
+                    use_container_width=True,
+                )
 
     template_bytes = safe_template_bytes(BASE / "data" / "creator_sample.csv")
     if template_bytes is not None:
@@ -1793,4 +2246,3 @@ elif module == "audit":
             st.session_state.history = []
             st.success(t["history_cleared"])
             st.rerun()
-
